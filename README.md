@@ -4,7 +4,7 @@
 
 ## 项目目标
 
-- 用自定义 Agent loop 体现规划、工具调用、反思和迭代补足能力。
+- 用 LangGraph 体现规划、工具调用、反思和迭代补足能力。
 - 自动收集 AI Engineer / ML / LLM 相关的校招、实习、fellowship 岗位。
 - 覆盖至少 2 个招聘网站，并导出标准化 CSV / JSON。
 
@@ -14,10 +14,16 @@
 
 系统由以下模块组成：
 
-- `job_agent/agent`: Planner、Executor、Reflector、Runner
+- `job_agent/agent`: Planner、Executor、Reflector、LangGraph Runner
 - `job_agent/tools`: 搜索、抓取、分类、技能抽取、去重、导出
 - `job_agent/parsers`: Greenhouse / Lever / Ashby 解析器
 - `job_agent/services`: 文本归一化和可选 LLM 适配
+
+默认运行时是 LangGraph。旧版手写循环仍保留为 `classic` 运行时，方便对比和回退：
+
+```bash
+AGENT_RUNTIME=classic python3 scripts/run_agent.py
+```
 
 默认数据源优先使用公开 board API：
 

@@ -25,6 +25,7 @@ class Settings:
     openai_api_key: str = ""
     outputs_dir: Path = Path("outputs")
     source_domains: tuple[str, ...] = tuple(SOURCE_DOMAINS)
+    agent_runtime: str = "langgraph"
 
     @property
     def llm_enabled(self) -> bool:
@@ -47,5 +48,5 @@ def load_settings() -> Settings:
         llm_model=os.getenv("OPENAI_MODEL", "gpt-4.1-mini"),
         openai_api_key=os.getenv("OPENAI_API_KEY", ""),
         outputs_dir=Path(os.getenv("OUTPUTS_DIR", "outputs")),
+        agent_runtime=os.getenv("AGENT_RUNTIME", "langgraph").strip().lower(),
     )
-
