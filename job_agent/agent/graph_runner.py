@@ -21,7 +21,16 @@ from job_agent.agent.reflector import Reflector
 from job_agent.agent.reporting import export_run_report
 from job_agent.agent.state import AgentState
 from job_agent.config import Settings
-from job_agent.models import IterationMetrics, RunReport, SearchPlanItem
+from job_agent.models import (
+    ClassificationResult,
+    IterationMetrics,
+    JobPosting,
+    RawJobPosting,
+    RejectionRecord,
+    RunReport,
+    SearchPlanItem,
+    SourceStats,
+)
 from job_agent.parsers.registry import ParserRegistry
 from job_agent.tools.classify import JobClassifier
 from job_agent.tools.dedupe import DeduplicationTool
@@ -39,10 +48,89 @@ EXPORT_NODE = "export_result"
 
 
 class GraphState(TypedDict):
-    state: AgentState
+    target_count: int
+    max_iterations: int
+    source_domains: tuple[str, ...]
+    iteration: int
+    search_phase: int
+    iterations_without_progress: int
+    accepted_jobs: list[JobPosting]
+    rejected_jobs: list[RejectionRecord]
+    visited_urls: set[str]
+    tried_queries: set[str]
+    query_history: list[str]
+    source_stats: dict[str, SourceStats]
     plans: list[SearchPlanItem]
+    current_plan: SearchPlanItem | None
+    pending_urls: list[str]
+    current_url: str | None
+    current_raw_job: RawJobPosting | None
+    classification_result: ClassificationResult | None
+    current_job: JobPosting | None
+    last_error: str | None
     metrics: IterationMetrics | None
+    route_decision: str
     report: RunReport | None
+
+
+def build_initial_graph_state(settings: Settings) -> GraphState:
+    state = AgentState(
+        target_count=settings.target_count,
+        max_iterations=settings.max_iterations,
+        source_domains=settings.source_domains,
+    )
+    return {
+        **_agent_state_update(state),
+        "plans": [],
+        "current_plan": None,
+        "pending_urls": [],
+        "current_url": None,
+        "current_raw_job": None,
+        "classification_result": None,
+        "current_job": None,
+        "last_error": None,
+        "metrics": None,
+        "route_decision": START,
+        "report": None,
+    }
+
+
+def to_agent_state(graph_state: GraphState) -> AgentState:
+    return AgentState(
+        target_count=graph_state["target_count"],
+        max_iterations=graph_state["max_iterations"],
+        source_domains=graph_state["source_domains"],
+        iteration=graph_state["iteration"],
+        search_phase=graph_state["search_phase"],
+        iterations_without_progress=graph_state["iterations_without_progress"],
+        accepted_jobs=graph_state["accepted_jobs"],
+        rejected_jobs=graph_state["rejected_jobs"],
+        visited_urls=graph_state["visited_urls"],
+        tried_queries=graph_state["tried_queries"],
+        query_history=graph_state["query_history"],
+        source_stats=graph_state["source_stats"],
+    )
+
+
+def _agent_state_update(state: AgentState) -> dict[str, object]:
+    return {
+        "target_count": state.target_count,
+        "max_iterations": state.max_iterations,
+        "source_domains": state.source_domains,
+        "iteration": state.iteration,
+        "search_phase": state.search_phase,
+        "iterations_without_progress": state.iterations_without_progress,
+        "accepted_jobs": state.accepted_jobs,
+        "rejected_jobs": state.rejected_jobs,
+        "visited_urls": state.visited_urls,
+        "tried_queries": state.tried_queries,
+        "query_history": state.query_history,
+        "source_stats": state.source_stats,
+    }
+
+
+def _next_plan(plans: list[SearchPlanItem]) -> SearchPlanItem | None:
+    return plans[0] if plans else None
 
 
 class LangGraphAgentRunner:
@@ -50,17 +138,7 @@ class LangGraphAgentRunner:
         self.settings = settings
 
     def run(self) -> RunReport:
-        state = AgentState(
-            target_count=self.settings.target_count,
-            max_iterations=self.settings.max_iterations,
-            source_domains=self.settings.source_domains,
-        )
-        initial_state: GraphState = {
-            "state": state,
-            "plans": [],
-            "metrics": None,
-            "report": None,
-        }
+        initial_state = build_initial_graph_state(self.settings)
 
         with httpx.Client() as client:
             graph = self._build_graph(client)
@@ -88,40 +166,59 @@ class LangGraphAgentRunner:
         reflector = Reflector()
 
         def plan_queries(graph_state: GraphState) -> dict[str, object]:
-            state = graph_state["state"]
+            state = to_agent_state(graph_state)
             state.iteration += 1
             plans = planner.plan(state)
             if not plans:
                 LOGGER.info("Planner produced no more queries. Stopping.")
-                return {"state": state, "plans": [], "metrics": None}
+                return {
+                    **_agent_state_update(state),
+                    "plans": [],
+                    "current_plan": None,
+                    "metrics": None,
+                    "route_decision": EXPORT_NODE,
+                }
 
             LOGGER.info(
                 "Starting iteration %s with %s planned queries.",
                 state.iteration,
                 len(plans),
             )
-            return {"state": state, "plans": plans, "metrics": None}
+            return {
+                **_agent_state_update(state),
+                "plans": plans,
+                "current_plan": _next_plan(plans),
+                "metrics": None,
+                "route_decision": EXECUTE_NODE,
+            }
 
         def execute_iteration(graph_state: GraphState) -> dict[str, object]:
-            state = graph_state["state"]
+            state = to_agent_state(graph_state)
             metrics = executor.execute_iteration(state, graph_state["plans"])
-            return {"state": state, "metrics": metrics}
+            return {
+                **_agent_state_update(state),
+                "metrics": metrics,
+                "route_decision": REFLECT_NODE,
+            }
 
         def reflect(graph_state: GraphState) -> dict[str, object]:
-            state = graph_state["state"]
+            state = to_agent_state(graph_state)
             metrics = graph_state["metrics"]
             if metrics is not None:
                 reflector.update(state, metrics)
-            return {"state": state}
+            return {
+                **_agent_state_update(state),
+                "route_decision": EXPORT_NODE if state.should_stop() else PLAN_NODE,
+            }
 
         def export_result(graph_state: GraphState) -> dict[str, object]:
-            report = export_run_report(graph_state["state"], export_tool)
-            return {"report": report}
+            report = export_run_report(to_agent_state(graph_state), export_tool)
+            return {"report": report, "route_decision": END}
 
         def route_entry(
             graph_state: GraphState,
         ) -> Literal["plan_queries", "export_result"]:
-            if graph_state["state"].should_stop():
+            if to_agent_state(graph_state).should_stop():
                 return EXPORT_NODE
             return PLAN_NODE
 
@@ -135,7 +232,7 @@ class LangGraphAgentRunner:
         def route_after_reflection(
             graph_state: GraphState,
         ) -> Literal["plan_queries", "export_result"]:
-            if graph_state["state"].should_stop():
+            if to_agent_state(graph_state).should_stop():
                 return EXPORT_NODE
             return PLAN_NODE
 
