@@ -25,6 +25,12 @@
 AGENT_RUNTIME=classic python3 scripts/run_agent.py
 ```
 
+当前 LangGraph 粗粒度工作流：
+
+```text
+plan_queries -> search_sources -> process_candidates -> reflect_strategy -> export_result
+```
+
 默认数据源优先使用公开 board API：
 
 - `job-boards.greenhouse.io`

@@ -30,3 +30,18 @@ def test_langgraph_runner_exports_when_initial_state_should_stop(tmp_path):
     assert report.collected_count == 0
     assert report.iterations == 0
     assert Path(report.output_csv).exists()
+
+
+def test_langgraph_runner_exports_when_planner_has_no_sources(tmp_path):
+    settings = Settings(
+        target_count=1,
+        max_iterations=1,
+        source_domains=(),
+        outputs_dir=tmp_path,
+    )
+
+    report = LangGraphAgentRunner(settings).run()
+
+    assert report.collected_count == 0
+    assert report.iterations == 1
+    assert Path(report.output_csv).exists()

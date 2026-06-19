@@ -42,8 +42,9 @@ from job_agent.tools.search import SearchTool
 LOGGER = logging.getLogger(__name__)
 
 PLAN_NODE = "plan_queries"
-EXECUTE_NODE = "execute_iteration"
-REFLECT_NODE = "reflect"
+SEARCH_NODE = "search_sources"
+PROCESS_NODE = "process_candidates"
+REFLECT_NODE = "reflect_strategy"
 EXPORT_NODE = "export_result"
 
 
@@ -63,6 +64,7 @@ class GraphState(TypedDict):
     plans: list[SearchPlanItem]
     current_plan: SearchPlanItem | None
     pending_urls: list[str]
+    pending_url_sources: dict[str, str]
     current_url: str | None
     current_raw_job: RawJobPosting | None
     classification_result: ClassificationResult | None
@@ -84,6 +86,7 @@ def build_initial_graph_state(settings: Settings) -> GraphState:
         "plans": [],
         "current_plan": None,
         "pending_urls": [],
+        "pending_url_sources": {},
         "current_url": None,
         "current_raw_job": None,
         "classification_result": None,
@@ -175,6 +178,9 @@ class LangGraphAgentRunner:
                     **_agent_state_update(state),
                     "plans": [],
                     "current_plan": None,
+                    "pending_urls": [],
+                    "pending_url_sources": {},
+                    "current_url": None,
                     "metrics": None,
                     "route_decision": EXPORT_NODE,
                 }
@@ -189,19 +195,45 @@ class LangGraphAgentRunner:
                 "plans": plans,
                 "current_plan": _next_plan(plans),
                 "metrics": None,
-                "route_decision": EXECUTE_NODE,
+                "route_decision": SEARCH_NODE,
             }
 
-        def execute_iteration(graph_state: GraphState) -> dict[str, object]:
+        def search_sources(graph_state: GraphState) -> dict[str, object]:
             state = to_agent_state(graph_state)
-            metrics = executor.execute_iteration(state, graph_state["plans"])
+            pending_urls, pending_url_sources, metrics = executor.search_sources(
+                state,
+                graph_state["plans"],
+            )
             return {
                 **_agent_state_update(state),
+                "pending_urls": pending_urls,
+                "pending_url_sources": pending_url_sources,
+                "current_url": pending_urls[0] if pending_urls else None,
+                "metrics": metrics,
+                "route_decision": PROCESS_NODE,
+            }
+
+        def process_candidates(graph_state: GraphState) -> dict[str, object]:
+            state = to_agent_state(graph_state)
+            metrics = graph_state["metrics"] or IterationMetrics(
+                iteration=state.iteration
+            )
+            metrics = executor.process_candidates(
+                state,
+                graph_state["pending_urls"],
+                graph_state["pending_url_sources"],
+                metrics,
+            )
+            return {
+                **_agent_state_update(state),
+                "pending_urls": [],
+                "pending_url_sources": {},
+                "current_url": None,
                 "metrics": metrics,
                 "route_decision": REFLECT_NODE,
             }
 
-        def reflect(graph_state: GraphState) -> dict[str, object]:
+        def reflect_strategy(graph_state: GraphState) -> dict[str, object]:
             state = to_agent_state(graph_state)
             metrics = graph_state["metrics"]
             if metrics is not None:
@@ -224,9 +256,9 @@ class LangGraphAgentRunner:
 
         def route_after_planning(
             graph_state: GraphState,
-        ) -> Literal["execute_iteration", "export_result"]:
+        ) -> Literal["search_sources", "export_result"]:
             if graph_state["plans"]:
-                return EXECUTE_NODE
+                return SEARCH_NODE
             return EXPORT_NODE
 
         def route_after_reflection(
@@ -238,8 +270,9 @@ class LangGraphAgentRunner:
 
         graph = StateGraph(GraphState)
         graph.add_node(PLAN_NODE, plan_queries)
-        graph.add_node(EXECUTE_NODE, execute_iteration)
-        graph.add_node(REFLECT_NODE, reflect)
+        graph.add_node(SEARCH_NODE, search_sources)
+        graph.add_node(PROCESS_NODE, process_candidates)
+        graph.add_node(REFLECT_NODE, reflect_strategy)
         graph.add_node(EXPORT_NODE, export_result)
 
         graph.add_conditional_edges(
@@ -250,9 +283,10 @@ class LangGraphAgentRunner:
         graph.add_conditional_edges(
             PLAN_NODE,
             route_after_planning,
-            {EXECUTE_NODE: EXECUTE_NODE, EXPORT_NODE: EXPORT_NODE},
+            {SEARCH_NODE: SEARCH_NODE, EXPORT_NODE: EXPORT_NODE},
         )
-        graph.add_edge(EXECUTE_NODE, REFLECT_NODE)
+        graph.add_edge(SEARCH_NODE, PROCESS_NODE)
+        graph.add_edge(PROCESS_NODE, REFLECT_NODE)
         graph.add_conditional_edges(
             REFLECT_NODE,
             route_after_reflection,

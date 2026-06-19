@@ -18,6 +18,7 @@ def test_initial_graph_state_exposes_workflow_fields():
     assert graph_state["plans"] == []
     assert graph_state["current_plan"] is None
     assert graph_state["pending_urls"] == []
+    assert graph_state["pending_url_sources"] == {}
     assert graph_state["current_url"] is None
     assert graph_state["current_raw_job"] is None
     assert graph_state["classification_result"] is None
