@@ -20,8 +20,12 @@ def test_initial_graph_state_exposes_workflow_fields():
     assert graph_state["pending_urls"] == []
     assert graph_state["pending_url_sources"] == {}
     assert graph_state["current_url"] is None
+    assert graph_state["current_url_source"] is None
+    assert graph_state["current_html"] is None
     assert graph_state["current_raw_job"] is None
     assert graph_state["classification_result"] is None
+    assert graph_state["current_tech_tags"] == []
+    assert graph_state["current_requirements"] == ""
     assert graph_state["current_job"] is None
     assert graph_state["last_error"] is None
     assert graph_state["metrics"] is None

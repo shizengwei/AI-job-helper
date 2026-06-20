@@ -25,10 +25,13 @@
 AGENT_RUNTIME=classic python3 scripts/run_agent.py
 ```
 
-当前 LangGraph 粗粒度工作流：
+当前 LangGraph 工作流：
 
 ```text
-plan_queries -> search_sources -> process_candidates -> reflect_strategy -> export_result
+plan_queries -> search_sources -> next_candidate
+next_candidate -> fetch_or_load_candidate -> parse_job -> evaluate_job
+evaluate_job -> extract_job_details -> deduplicate_and_merge -> next_candidate
+next_candidate -> reflect_strategy -> export_result
 ```
 
 默认数据源优先使用公开 board API：

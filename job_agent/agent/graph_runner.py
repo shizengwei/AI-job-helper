@@ -43,7 +43,12 @@ LOGGER = logging.getLogger(__name__)
 
 PLAN_NODE = "plan_queries"
 SEARCH_NODE = "search_sources"
-PROCESS_NODE = "process_candidates"
+NEXT_CANDIDATE_NODE = "next_candidate"
+FETCH_NODE = "fetch_or_load_candidate"
+PARSE_NODE = "parse_job"
+EVALUATE_NODE = "evaluate_job"
+EXTRACT_NODE = "extract_job_details"
+DEDUPE_NODE = "deduplicate_and_merge"
 REFLECT_NODE = "reflect_strategy"
 EXPORT_NODE = "export_result"
 
@@ -66,8 +71,12 @@ class GraphState(TypedDict):
     pending_urls: list[str]
     pending_url_sources: dict[str, str]
     current_url: str | None
+    current_url_source: str | None
+    current_html: str | None
     current_raw_job: RawJobPosting | None
     classification_result: ClassificationResult | None
+    current_tech_tags: list[str]
+    current_requirements: str
     current_job: JobPosting | None
     last_error: str | None
     metrics: IterationMetrics | None
@@ -88,8 +97,12 @@ def build_initial_graph_state(settings: Settings) -> GraphState:
         "pending_urls": [],
         "pending_url_sources": {},
         "current_url": None,
+        "current_url_source": None,
+        "current_html": None,
         "current_raw_job": None,
         "classification_result": None,
+        "current_tech_tags": [],
+        "current_requirements": "",
         "current_job": None,
         "last_error": None,
         "metrics": None,
@@ -181,6 +194,13 @@ class LangGraphAgentRunner:
                     "pending_urls": [],
                     "pending_url_sources": {},
                     "current_url": None,
+                    "current_url_source": None,
+                    "current_html": None,
+                    "current_raw_job": None,
+                    "classification_result": None,
+                    "current_tech_tags": [],
+                    "current_requirements": "",
+                    "current_job": None,
                     "metrics": None,
                     "route_decision": EXPORT_NODE,
                 }
@@ -210,27 +230,153 @@ class LangGraphAgentRunner:
                 "pending_url_sources": pending_url_sources,
                 "current_url": pending_urls[0] if pending_urls else None,
                 "metrics": metrics,
-                "route_decision": PROCESS_NODE,
+                "route_decision": NEXT_CANDIDATE_NODE,
             }
 
-        def process_candidates(graph_state: GraphState) -> dict[str, object]:
+        def next_candidate(graph_state: GraphState) -> dict[str, object]:
             state = to_agent_state(graph_state)
             metrics = graph_state["metrics"] or IterationMetrics(
                 iteration=state.iteration
             )
-            metrics = executor.process_candidates(
+            should_reflect = state.reached_target() or not graph_state["pending_urls"]
+            if should_reflect:
+                metrics = executor.finalize_iteration(state, metrics)
+            return {
+                **_agent_state_update(state),
+                "pending_urls": [] if should_reflect else graph_state["pending_urls"],
+                "pending_url_sources": (
+                    {} if should_reflect else graph_state["pending_url_sources"]
+                ),
+                "current_url": None,
+                "current_url_source": None,
+                "current_html": None,
+                "current_raw_job": None,
+                "classification_result": None,
+                "current_tech_tags": [],
+                "current_requirements": "",
+                "current_job": None,
+                "metrics": metrics,
+                "route_decision": REFLECT_NODE if should_reflect else FETCH_NODE,
+            }
+
+        def fetch_or_load_candidate(graph_state: GraphState) -> dict[str, object]:
+            state = to_agent_state(graph_state)
+            metrics = graph_state["metrics"] or IterationMetrics(
+                iteration=state.iteration
+            )
+            pending_urls = list(graph_state["pending_urls"])
+            pending_url_sources = dict(graph_state["pending_url_sources"])
+            if not pending_urls:
+                return {"route_decision": NEXT_CANDIDATE_NODE}
+
+            current_url = pending_urls.pop(0)
+            current_source = pending_url_sources.get(current_url, "")
+            raw_job, html, error = executor.fetch_or_load_candidate(
                 state,
-                graph_state["pending_urls"],
-                graph_state["pending_url_sources"],
+                current_url,
+                current_source,
+                metrics,
+            )
+            if raw_job is not None:
+                route_decision = EVALUATE_NODE
+            elif html is not None:
+                route_decision = PARSE_NODE
+            else:
+                route_decision = NEXT_CANDIDATE_NODE
+
+            return {
+                **_agent_state_update(state),
+                "pending_urls": pending_urls,
+                "current_url": current_url,
+                "current_url_source": current_source,
+                "current_html": html,
+                "current_raw_job": raw_job,
+                "classification_result": None,
+                "current_tech_tags": [],
+                "current_requirements": "",
+                "current_job": None,
+                "last_error": error,
+                "metrics": metrics,
+                "route_decision": route_decision,
+            }
+
+        def parse_job(graph_state: GraphState) -> dict[str, object]:
+            state = to_agent_state(graph_state)
+            metrics = graph_state["metrics"] or IterationMetrics(
+                iteration=state.iteration
+            )
+            raw_job, error = executor.parse_job(
+                state,
+                graph_state["current_url"] or "",
+                graph_state["current_html"],
+                graph_state["current_url_source"] or "",
                 metrics,
             )
             return {
                 **_agent_state_update(state),
-                "pending_urls": [],
-                "pending_url_sources": {},
-                "current_url": None,
+                "current_html": None,
+                "current_raw_job": raw_job,
+                "last_error": error,
                 "metrics": metrics,
-                "route_decision": REFLECT_NODE,
+                "route_decision": (
+                    EVALUATE_NODE if raw_job is not None else NEXT_CANDIDATE_NODE
+                ),
+            }
+
+        def evaluate_job(graph_state: GraphState) -> dict[str, object]:
+            state = to_agent_state(graph_state)
+            metrics = graph_state["metrics"] or IterationMetrics(
+                iteration=state.iteration
+            )
+            raw_job = graph_state["current_raw_job"]
+            if raw_job is None:
+                return {"route_decision": NEXT_CANDIDATE_NODE}
+
+            result = executor.evaluate_job(state, raw_job, metrics)
+            return {
+                **_agent_state_update(state),
+                "classification_result": result,
+                "metrics": metrics,
+                "route_decision": (
+                    EXTRACT_NODE if result.accepted else NEXT_CANDIDATE_NODE
+                ),
+            }
+
+        def extract_job_details(graph_state: GraphState) -> dict[str, object]:
+            raw_job = graph_state["current_raw_job"]
+            if raw_job is None:
+                return {"route_decision": NEXT_CANDIDATE_NODE}
+
+            tech_tags, requirements = executor.extract_job_details(raw_job)
+            return {
+                "current_tech_tags": tech_tags,
+                "current_requirements": requirements,
+                "route_decision": DEDUPE_NODE,
+            }
+
+        def deduplicate_and_merge(graph_state: GraphState) -> dict[str, object]:
+            state = to_agent_state(graph_state)
+            metrics = graph_state["metrics"] or IterationMetrics(
+                iteration=state.iteration
+            )
+            raw_job = graph_state["current_raw_job"]
+            result = graph_state["classification_result"]
+            if raw_job is None or result is None:
+                return {"route_decision": NEXT_CANDIDATE_NODE}
+
+            job = executor.deduplicate_and_merge(
+                state,
+                raw_job,
+                result,
+                graph_state["current_tech_tags"],
+                graph_state["current_requirements"],
+                metrics,
+            )
+            return {
+                **_agent_state_update(state),
+                "current_job": job,
+                "metrics": metrics,
+                "route_decision": NEXT_CANDIDATE_NODE,
             }
 
         def reflect_strategy(graph_state: GraphState) -> dict[str, object]:
@@ -261,6 +407,24 @@ class LangGraphAgentRunner:
                 return SEARCH_NODE
             return EXPORT_NODE
 
+        def route_after_next_candidate(graph_state: GraphState) -> str:
+            return graph_state["route_decision"]
+
+        def route_after_fetch(graph_state: GraphState) -> str:
+            return graph_state["route_decision"]
+
+        def route_after_parse(graph_state: GraphState) -> str:
+            return graph_state["route_decision"]
+
+        def route_after_evaluation(graph_state: GraphState) -> str:
+            return graph_state["route_decision"]
+
+        def route_after_extraction(graph_state: GraphState) -> str:
+            return graph_state["route_decision"]
+
+        def route_after_deduplication(graph_state: GraphState) -> str:
+            return graph_state["route_decision"]
+
         def route_after_reflection(
             graph_state: GraphState,
         ) -> Literal["plan_queries", "export_result"]:
@@ -271,7 +435,12 @@ class LangGraphAgentRunner:
         graph = StateGraph(GraphState)
         graph.add_node(PLAN_NODE, plan_queries)
         graph.add_node(SEARCH_NODE, search_sources)
-        graph.add_node(PROCESS_NODE, process_candidates)
+        graph.add_node(NEXT_CANDIDATE_NODE, next_candidate)
+        graph.add_node(FETCH_NODE, fetch_or_load_candidate)
+        graph.add_node(PARSE_NODE, parse_job)
+        graph.add_node(EVALUATE_NODE, evaluate_job)
+        graph.add_node(EXTRACT_NODE, extract_job_details)
+        graph.add_node(DEDUPE_NODE, deduplicate_and_merge)
         graph.add_node(REFLECT_NODE, reflect_strategy)
         graph.add_node(EXPORT_NODE, export_result)
 
@@ -285,8 +454,47 @@ class LangGraphAgentRunner:
             route_after_planning,
             {SEARCH_NODE: SEARCH_NODE, EXPORT_NODE: EXPORT_NODE},
         )
-        graph.add_edge(SEARCH_NODE, PROCESS_NODE)
-        graph.add_edge(PROCESS_NODE, REFLECT_NODE)
+        graph.add_edge(SEARCH_NODE, NEXT_CANDIDATE_NODE)
+        graph.add_conditional_edges(
+            NEXT_CANDIDATE_NODE,
+            route_after_next_candidate,
+            {FETCH_NODE: FETCH_NODE, REFLECT_NODE: REFLECT_NODE},
+        )
+        graph.add_conditional_edges(
+            FETCH_NODE,
+            route_after_fetch,
+            {
+                PARSE_NODE: PARSE_NODE,
+                EVALUATE_NODE: EVALUATE_NODE,
+                NEXT_CANDIDATE_NODE: NEXT_CANDIDATE_NODE,
+            },
+        )
+        graph.add_conditional_edges(
+            PARSE_NODE,
+            route_after_parse,
+            {
+                EVALUATE_NODE: EVALUATE_NODE,
+                NEXT_CANDIDATE_NODE: NEXT_CANDIDATE_NODE,
+            },
+        )
+        graph.add_conditional_edges(
+            EVALUATE_NODE,
+            route_after_evaluation,
+            {
+                EXTRACT_NODE: EXTRACT_NODE,
+                NEXT_CANDIDATE_NODE: NEXT_CANDIDATE_NODE,
+            },
+        )
+        graph.add_conditional_edges(
+            EXTRACT_NODE,
+            route_after_extraction,
+            {DEDUPE_NODE: DEDUPE_NODE, NEXT_CANDIDATE_NODE: NEXT_CANDIDATE_NODE},
+        )
+        graph.add_conditional_edges(
+            DEDUPE_NODE,
+            route_after_deduplication,
+            {NEXT_CANDIDATE_NODE: NEXT_CANDIDATE_NODE},
+        )
         graph.add_conditional_edges(
             REFLECT_NODE,
             route_after_reflection,
@@ -296,4 +504,10 @@ class LangGraphAgentRunner:
         return graph.compile()
 
     def _recursion_limit(self) -> int:
-        return max(25, self.settings.max_iterations * 5 + 10)
+        per_iteration_steps = (
+            4
+            + self.settings.batch_queries
+            * self.settings.search_results_per_query
+            * 8
+        )
+        return max(100, self.settings.max_iterations * per_iteration_steps + 20)

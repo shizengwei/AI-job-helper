@@ -42,6 +42,15 @@ class AcceptingClassifier:
         )
 
 
+class RejectingClassifier:
+    def classify(self, job: RawJobPosting) -> ClassificationResult:
+        return ClassificationResult(
+            accepted=False,
+            score=1,
+            reason="not a campus AI role",
+        )
+
+
 class StubExtractor:
     def extract(self, job: RawJobPosting) -> tuple[list[str], str]:
         return ["Machine Learning"], "Internship role."
@@ -59,12 +68,16 @@ def _raw_job(url: str) -> RawJobPosting:
     )
 
 
-def _executor(urls: list[str], raw_jobs: dict[str, RawJobPosting]) -> AgentExecutor:
+def _executor(
+    urls: list[str],
+    raw_jobs: dict[str, RawJobPosting],
+    classifier=None,  # type: ignore[no-untyped-def]
+) -> AgentExecutor:
     return AgentExecutor(
         search_tool=StubSearchTool(urls, raw_jobs),
         fetch_tool=UnusedFetchTool(),
         parser_registry=UnusedParserRegistry(),
-        classifier=AcceptingClassifier(),
+        classifier=classifier or AcceptingClassifier(),
         extractor=StubExtractor(),
         deduper=DeduplicationTool(),
     )
@@ -159,3 +172,49 @@ def test_process_candidates_accepts_cached_raw_job():
     assert state.source_stats["jobs.lever.co"].fetched == 1
     assert state.source_stats["jobs.lever.co"].accepted == 1
     assert state.visited_urls == {url}
+
+
+def test_fetch_or_load_candidate_uses_cached_raw_job():
+    url = "https://jobs.lever.co/example/123"
+    executor = _executor([url], {url: _raw_job(url)})
+    state = AgentState(
+        target_count=10,
+        max_iterations=2,
+        source_domains=("jobs.lever.co",),
+        iteration=1,
+    )
+    metrics = IterationMetrics(iteration=1)
+
+    raw_job, html, error = executor.fetch_or_load_candidate(
+        state,
+        url,
+        "jobs.lever.co",
+        metrics,
+    )
+
+    assert raw_job is not None
+    assert html is None
+    assert error is None
+    assert metrics.parsed_jobs == 1
+    assert state.source_stats["jobs.lever.co"].fetched == 1
+    assert state.visited_urls == {url}
+
+
+def test_evaluate_job_records_rejection():
+    url = "https://jobs.lever.co/example/123"
+    raw_job = _raw_job(url)
+    executor = _executor([url], {url: raw_job}, classifier=RejectingClassifier())
+    state = AgentState(
+        target_count=10,
+        max_iterations=2,
+        source_domains=("jobs.lever.co",),
+        iteration=1,
+    )
+    metrics = IterationMetrics(iteration=1)
+
+    result = executor.evaluate_job(state, raw_job, metrics)
+
+    assert result.accepted is False
+    assert metrics.rejected_jobs == 1
+    assert state.source_stats["jobs.lever.co"].rejected == 1
+    assert state.rejected_jobs[0].job_url == url

@@ -6,8 +6,10 @@ import logging
 
 from job_agent.agent.state import AgentState
 from job_agent.models import (
+    ClassificationResult,
     IterationMetrics,
     JobPosting,
+    RawJobPosting,
     RejectionRecord,
     SearchPlanItem,
 )
@@ -87,63 +89,150 @@ class AgentExecutor:
     ) -> IterationMetrics:
         for url in pending_urls:
             if state.reached_target():
-                return self._finalize(state, metrics)
-            state.visited_urls.add(url)
+                return self.finalize_iteration(state, metrics)
             source_domain = pending_url_sources.get(url, "")
-            try:
-                raw_job = self.search_tool.get_cached_raw_job(url)
-                if raw_job is None:
-                    html = self.fetch_tool.fetch(url)
-                    raw_job = self.parser_registry.parse(html, url)
+
+            raw_job, html, error = self.fetch_or_load_candidate(
+                state,
+                url,
+                source_domain,
+                metrics,
+            )
+            if error:
+                continue
+
+            if raw_job is None:
+                raw_job, error = self.parse_job(
+                    state,
+                    url,
+                    html,
+                    source_domain,
+                    metrics,
+                )
+            if raw_job is None or error:
+                continue
+
+            result = self.evaluate_job(state, raw_job, metrics)
+            if not result.accepted:
+                continue
+
+            tech_tags, requirements = self.extract_job_details(raw_job)
+            self.deduplicate_and_merge(
+                state,
+                raw_job,
+                result,
+                tech_tags,
+                requirements,
+                metrics,
+            )
+
+        return self.finalize_iteration(state, metrics)
+
+    def fetch_or_load_candidate(
+        self,
+        state: AgentState,
+        url: str,
+        source_domain: str,
+        metrics: IterationMetrics,
+    ) -> tuple[RawJobPosting | None, str | None, str | None]:
+        state.visited_urls.add(url)
+        try:
+            raw_job = self.search_tool.get_cached_raw_job(url)
+            if raw_job is not None:
                 if source_domain:
                     state.source_stats[source_domain].fetched += 1
                 metrics.parsed_jobs += 1
-            except Exception as exc:
-                LOGGER.warning("Failed to fetch/parse %s: %s", url, exc)
-                metrics.fetch_errors += 1
-                if source_domain:
-                    state.source_stats[source_domain].errors += 1
-                continue
+                return raw_job, None, None
+            return None, self.fetch_tool.fetch(url), None
+        except Exception as exc:
+            LOGGER.warning("Failed to fetch %s: %s", url, exc)
+            metrics.fetch_errors += 1
+            if source_domain:
+                state.source_stats[source_domain].errors += 1
+            return None, None, str(exc)
 
-            result = self.classifier.classify(raw_job)
-            if not result.accepted:
-                metrics.rejected_jobs += 1
-                state.source_stats[raw_job.source].rejected += 1
-                state.rejected_jobs.append(
-                    RejectionRecord(
-                        job_url=raw_job.job_url,
-                        title=raw_job.title,
-                        company=raw_job.company,
-                        reason=result.reason,
-                    )
+    def parse_job(
+        self,
+        state: AgentState,
+        url: str,
+        html: str | None,
+        source_domain: str,
+        metrics: IterationMetrics,
+    ) -> tuple[RawJobPosting | None, str | None]:
+        if html is None:
+            return None, "missing html"
+        try:
+            raw_job = self.parser_registry.parse(html, url)
+            if source_domain:
+                state.source_stats[source_domain].fetched += 1
+            metrics.parsed_jobs += 1
+            return raw_job, None
+        except Exception as exc:
+            LOGGER.warning("Failed to parse %s: %s", url, exc)
+            metrics.fetch_errors += 1
+            if source_domain:
+                state.source_stats[source_domain].errors += 1
+            return None, str(exc)
+
+    def evaluate_job(
+        self,
+        state: AgentState,
+        raw_job: RawJobPosting,
+        metrics: IterationMetrics,
+    ) -> ClassificationResult:
+        result = self.classifier.classify(raw_job)
+        if not result.accepted:
+            metrics.rejected_jobs += 1
+            state.source_stats[raw_job.source].rejected += 1
+            state.rejected_jobs.append(
+                RejectionRecord(
+                    job_url=raw_job.job_url,
+                    title=raw_job.title,
+                    company=raw_job.company,
+                    reason=result.reason,
                 )
-                continue
-
-            tech_tags, requirements = self.extractor.extract(raw_job)
-            job = JobPosting(
-                title=raw_job.title,
-                company=raw_job.company,
-                location=raw_job.location,
-                salary=raw_job.salary,
-                tech_tags=tech_tags,
-                requirements=requirements,
-                source=raw_job.source,
-                job_url=raw_job.job_url,
-                match_score=result.score,
-                match_reason=result.reason,
-                description=raw_job.description,
             )
-            dedupe_status = self.deduper.add(job)
-            if dedupe_status in {"added", "replaced"}:
-                state.accepted_jobs = self.deduper.jobs()
-                metrics.accepted_jobs += 1
-                state.source_stats[raw_job.source].accepted += 1
-            else:
-                metrics.rejected_jobs += 1
+        return result
 
-        return self._finalize(state, metrics)
+    def extract_job_details(self, raw_job: RawJobPosting) -> tuple[list[str], str]:
+        return self.extractor.extract(raw_job)
 
-    def _finalize(self, state: AgentState, metrics: IterationMetrics) -> IterationMetrics:
+    def deduplicate_and_merge(
+        self,
+        state: AgentState,
+        raw_job: RawJobPosting,
+        result: ClassificationResult,
+        tech_tags: list[str],
+        requirements: str,
+        metrics: IterationMetrics,
+    ) -> JobPosting:
+        job = JobPosting(
+            title=raw_job.title,
+            company=raw_job.company,
+            location=raw_job.location,
+            salary=raw_job.salary,
+            tech_tags=tech_tags,
+            requirements=requirements,
+            source=raw_job.source,
+            job_url=raw_job.job_url,
+            match_score=result.score,
+            match_reason=result.reason,
+            description=raw_job.description,
+        )
+        dedupe_status = self.deduper.add(job)
+        if dedupe_status in {"added", "replaced"}:
+            state.accepted_jobs = self.deduper.jobs()
+            metrics.accepted_jobs += 1
+            state.source_stats[raw_job.source].accepted += 1
+        else:
+            metrics.rejected_jobs += 1
+        return job
+
+    def finalize_iteration(
+        self,
+        state: AgentState,
+        metrics: IterationMetrics,
+    ) -> IterationMetrics:
         LOGGER.info(
             "Iteration %s finished. Accepted total: %s",
             state.iteration,
