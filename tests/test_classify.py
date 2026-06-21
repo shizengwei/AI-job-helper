@@ -19,6 +19,8 @@ def test_heuristic_classifier_accepts_ai_intern_role():
 
     assert result.accepted is True
     assert result.score >= 4
+    assert classifier.last_strategy == "heuristic"
+    assert classifier.last_fallback_reason == "llm_disabled"
 
 
 def test_heuristic_classifier_rejects_backend_role():

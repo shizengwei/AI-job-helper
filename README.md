@@ -34,6 +34,18 @@ evaluate_job -> extract_job_details -> deduplicate_and_merge -> next_candidate
 next_candidate -> reflect_strategy -> export_result
 ```
 
+运行报告会记录 `progress_events`、`fallback_events`、`checkpoint_backend` 和 `checkpoint_thread_id`。默认使用 LangGraph memory checkpoint；需要关闭或改用 SQLite checkpoint 时可设置：
+
+```bash
+AGENT_CHECKPOINT_BACKEND=off python3 scripts/run_agent.py
+
+python3 -m pip install -e '.[checkpoint]'
+AGENT_CHECKPOINT_BACKEND=sqlite \
+AGENT_CHECKPOINT_DB=outputs/langgraph_checkpoints.sqlite \
+AGENT_CHECKPOINT_THREAD_ID=job-agent-default \
+python3 scripts/run_agent.py
+```
+
 默认数据源优先使用公开 board API：
 
 - `job-boards.greenhouse.io`

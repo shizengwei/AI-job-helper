@@ -27,11 +27,21 @@ class QueryPlanner:
             if settings.llm_enabled
             else None
         )
+        self.last_strategy = ""
+        self.last_fallback_reason = ""
     # 如果LLM启用且返回了建议的查询计划，则使用LLM生成的计划。否则，使用基于规则的计划生成方法。
     def plan(self, state) -> list[SearchPlanItem]:  # type: ignore[no-untyped-def]
+        self.last_strategy = ""
+        self.last_fallback_reason = ""
         llm_plans = self._plan_with_llm(state)
         if llm_plans:
+            self.last_strategy = "llm"
             return llm_plans
+        self.last_strategy = "rules"
+        if self.llm is None:
+            self.last_fallback_reason = "llm_disabled"
+        else:
+            self.last_fallback_reason = "llm_no_valid_query_candidates"
         return self._plan_with_rules(state)
 
     def _plan_with_llm(self, state) -> list[SearchPlanItem]:  # type: ignore[no-untyped-def]

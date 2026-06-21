@@ -18,14 +18,25 @@ class SkillExtractionTool:
             if settings.llm_enabled
             else None
         )
+        self.last_strategy = ""
+        self.last_fallback_reason = ""
 
     def extract(self, job: RawJobPosting) -> tuple[list[str], str]:
+        self.last_strategy = ""
+        self.last_fallback_reason = ""
         if self.llm is not None:
             llm_result = self.llm.extract_job_details(job)
             if llm_result is not None:
                 tags = llm_result.tech_tags or self._heuristic_tags(job.description)
                 summary = llm_result.requirements or self._heuristic_requirements(job.description)
+                self.last_strategy = "llm"
+                if not llm_result.tech_tags or not llm_result.requirements:
+                    self.last_fallback_reason = "llm_partial_result"
                 return tags, summary
+            self.last_fallback_reason = "llm_unavailable_or_failed"
+        else:
+            self.last_fallback_reason = "llm_disabled"
+        self.last_strategy = "heuristic"
         return self._heuristic_tags(job.description), self._heuristic_requirements(job.description)
 
     def _heuristic_tags(self, description: str) -> list[str]:
@@ -53,4 +64,3 @@ class SkillExtractionTool:
             candidates = [part for part in sentence_candidates if part]
         summary = " ".join(candidates[:3]) if candidates else clean_text(description)[:MAX_SUMMARY_CHARS]
         return summary[:MAX_SUMMARY_CHARS]
-

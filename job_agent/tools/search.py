@@ -39,14 +39,27 @@ class SearchTool:
         self.settings = settings
         self._api_cache: dict[str, list[BoardAPICandidate]] = {}
         self._raw_job_cache: dict[str, RawJobPosting] = {}
+        self.last_strategy = ""
+        self.last_fallback_events: list[str] = []
 
     def search(self, plan: SearchPlanItem, visited_urls: set[str]) -> list[str]:
+        self.last_strategy = ""
+        self.last_fallback_events = []
         results = self._search_board_api(plan, visited_urls)
         if results:
+            self.last_strategy = "board_api"
             return results
+        self.last_fallback_events.append(
+            f"api_search_empty -> search_engine_search: {plan.query}"
+        )
         results = self._search_duckduckgo(plan, visited_urls)
         if results:
+            self.last_strategy = "duckduckgo"
             return results
+        self.last_fallback_events.append(
+            f"duckduckgo_empty -> bing_search: {plan.query}"
+        )
+        self.last_strategy = "bing"
         return self._search_bing(plan, visited_urls)
 
     def _search_board_api(

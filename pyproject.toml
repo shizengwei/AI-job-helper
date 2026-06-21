@@ -19,6 +19,9 @@ dependencies = [
 llm = [
   "openai>=1.68.2",
 ]
+checkpoint = [
+  "langgraph-checkpoint-sqlite>=2.0.0",
+]
 dev = [
   "pytest>=8.3.4",
 ]

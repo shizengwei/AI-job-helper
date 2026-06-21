@@ -8,10 +8,14 @@ from job_agent.config import Settings, load_settings
 
 def test_load_settings_reads_agent_runtime(monkeypatch):
     monkeypatch.setenv("AGENT_RUNTIME", "classic")
+    monkeypatch.setenv("AGENT_CHECKPOINT_BACKEND", "off")
+    monkeypatch.setenv("AGENT_CHECKPOINT_THREAD_ID", "test-thread")
 
     settings = load_settings()
 
     assert settings.agent_runtime == "classic"
+    assert settings.checkpoint_backend == "off"
+    assert settings.checkpoint_thread_id == "test-thread"
 
 
 def test_build_runner_uses_classic_runtime_without_langgraph():
@@ -29,6 +33,8 @@ def test_langgraph_runner_exports_when_initial_state_should_stop(tmp_path):
 
     assert report.collected_count == 0
     assert report.iterations == 0
+    assert report.checkpoint_backend == "memory"
+    assert report.checkpoint_thread_id == "job-agent-default"
     assert Path(report.output_csv).exists()
 
 
@@ -44,4 +50,6 @@ def test_langgraph_runner_exports_when_planner_has_no_sources(tmp_path):
 
     assert report.collected_count == 0
     assert report.iterations == 1
+    assert any("plan_queries" in event for event in report.progress_events)
+    assert any("llm_plan_failed" in event for event in report.fallback_events)
     assert Path(report.output_csv).exists()

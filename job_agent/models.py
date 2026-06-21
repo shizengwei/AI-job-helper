@@ -103,6 +103,8 @@ class IterationMetrics:
     accepted_jobs: int = 0
     rejected_jobs: int = 0
     fetch_errors: int = 0
+    fallback_events: list[str] = field(default_factory=list)
+    progress_events: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -115,10 +117,13 @@ class RunReport:
     rejection_breakdown: dict[str, int]
     output_csv: str
     output_json: str
+    progress_events: list[str] = field(default_factory=list)
+    fallback_events: list[str] = field(default_factory=list)
+    checkpoint_backend: str = ""
+    checkpoint_thread_id: str = ""
     generated_at: str = field(
         default_factory=lambda: datetime.utcnow().isoformat(timespec="seconds") + "Z"
     )
 
     def to_json_dict(self) -> dict[str, object]:
         return asdict(self)
-

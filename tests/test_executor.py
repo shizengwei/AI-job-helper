@@ -34,6 +34,8 @@ class UnusedParserRegistry:
 
 
 class AcceptingClassifier:
+    last_fallback_reason = ""
+
     def classify(self, job: RawJobPosting) -> ClassificationResult:
         return ClassificationResult(
             accepted=True,
@@ -43,6 +45,8 @@ class AcceptingClassifier:
 
 
 class RejectingClassifier:
+    last_fallback_reason = ""
+
     def classify(self, job: RawJobPosting) -> ClassificationResult:
         return ClassificationResult(
             accepted=False,

@@ -29,6 +29,10 @@ def test_initial_graph_state_exposes_workflow_fields():
     assert graph_state["current_job"] is None
     assert graph_state["last_error"] is None
     assert graph_state["metrics"] is None
+    assert graph_state["progress_events"] == []
+    assert graph_state["fallback_events"] == []
+    assert graph_state["checkpoint_backend"] == "memory"
+    assert graph_state["checkpoint_thread_id"] == "job-agent-default"
     assert graph_state["report"] is None
     assert "jobs.lever.co" in graph_state["source_stats"]
 

@@ -65,6 +65,9 @@ class AgentExecutor:
 
             try:
                 urls = self.search_tool.search(plan, seen_urls)
+                metrics.fallback_events.extend(
+                    getattr(self.search_tool, "last_fallback_events", [])
+                )
                 state.source_stats[plan.source_domain].search_hits += len(urls)
                 metrics.discovered_urls += len(urls)
                 for url in urls:
@@ -75,6 +78,9 @@ class AgentExecutor:
                     seen_urls.add(url)
             except Exception as exc:
                 LOGGER.warning("Search failed for query %s: %s", plan.query, exc)
+                metrics.fallback_events.append(
+                    f"search_failed -> skip_query: {plan.query} ({exc})"
+                )
                 state.source_stats[plan.source_domain].errors += 1
                 continue
 
@@ -116,7 +122,7 @@ class AgentExecutor:
             if not result.accepted:
                 continue
 
-            tech_tags, requirements = self.extract_job_details(raw_job)
+            tech_tags, requirements = self.extract_job_details(raw_job, metrics)
             self.deduplicate_and_merge(
                 state,
                 raw_job,
@@ -147,6 +153,7 @@ class AgentExecutor:
         except Exception as exc:
             LOGGER.warning("Failed to fetch %s: %s", url, exc)
             metrics.fetch_errors += 1
+            metrics.fallback_events.append(f"fetch_failed -> retry_or_skip: {url} ({exc})")
             if source_domain:
                 state.source_stats[source_domain].errors += 1
             return None, None, str(exc)
@@ -160,6 +167,7 @@ class AgentExecutor:
         metrics: IterationMetrics,
     ) -> tuple[RawJobPosting | None, str | None]:
         if html is None:
+            metrics.fallback_events.append(f"parse_failed -> skip_candidate: {url} (missing html)")
             return None, "missing html"
         try:
             raw_job = self.parser_registry.parse(html, url)
@@ -170,6 +178,7 @@ class AgentExecutor:
         except Exception as exc:
             LOGGER.warning("Failed to parse %s: %s", url, exc)
             metrics.fetch_errors += 1
+            metrics.fallback_events.append(f"parse_failed -> skip_candidate: {url} ({exc})")
             if source_domain:
                 state.source_stats[source_domain].errors += 1
             return None, str(exc)
@@ -181,6 +190,12 @@ class AgentExecutor:
         metrics: IterationMetrics,
     ) -> ClassificationResult:
         result = self.classifier.classify(raw_job)
+        fallback_reason = getattr(self.classifier, "last_fallback_reason", "")
+        if fallback_reason:
+            metrics.fallback_events.append(
+                "llm_evaluate_failed -> heuristic_evaluate: "
+                f"{raw_job.job_url} ({fallback_reason})"
+            )
         if not result.accepted:
             metrics.rejected_jobs += 1
             state.source_stats[raw_job.source].rejected += 1
@@ -194,8 +209,19 @@ class AgentExecutor:
             )
         return result
 
-    def extract_job_details(self, raw_job: RawJobPosting) -> tuple[list[str], str]:
-        return self.extractor.extract(raw_job)
+    def extract_job_details(
+        self,
+        raw_job: RawJobPosting,
+        metrics: IterationMetrics | None = None,
+    ) -> tuple[list[str], str]:
+        details = self.extractor.extract(raw_job)
+        fallback_reason = getattr(self.extractor, "last_fallback_reason", "")
+        if metrics is not None and fallback_reason:
+            metrics.fallback_events.append(
+                "llm_extract_failed -> heuristic_extract: "
+                f"{raw_job.job_url} ({fallback_reason})"
+            )
+        return details
 
     def deduplicate_and_merge(
         self,

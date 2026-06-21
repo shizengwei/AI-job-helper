@@ -7,7 +7,15 @@ from collections import Counter
 from job_agent.models import RunReport
 
 
-def export_run_report(state, export_tool) -> RunReport:  # type: ignore[no-untyped-def]
+def export_run_report(  # type: ignore[no-untyped-def]
+    state,
+    export_tool,
+    *,
+    progress_events: list[str] | None = None,
+    fallback_events: list[str] | None = None,
+    checkpoint_backend: str = "",
+    checkpoint_thread_id: str = "",
+) -> RunReport:
     jobs = sorted(
         state.accepted_jobs,
         key=lambda job: (job.source, job.company.lower(), job.title.lower()),
@@ -23,6 +31,10 @@ def export_run_report(state, export_tool) -> RunReport:  # type: ignore[no-untyp
         rejection_breakdown=dict(rejection_breakdown),
         output_csv=str(csv_path),
         output_json=str(json_path),
+        progress_events=progress_events or [],
+        fallback_events=fallback_events or [],
+        checkpoint_backend=checkpoint_backend,
+        checkpoint_thread_id=checkpoint_thread_id,
     )
     export_tool.export_report(report)
     return report

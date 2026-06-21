@@ -80,6 +80,10 @@ class GraphState(TypedDict):
     current_job: JobPosting | None
     last_error: str | None
     metrics: IterationMetrics | None
+    progress_events: list[str]
+    fallback_events: list[str]
+    checkpoint_backend: str
+    checkpoint_thread_id: str
     route_decision: str
     report: RunReport | None
 
@@ -106,6 +110,10 @@ def build_initial_graph_state(settings: Settings) -> GraphState:
         "current_job": None,
         "last_error": None,
         "metrics": None,
+        "progress_events": [],
+        "fallback_events": [],
+        "checkpoint_backend": settings.checkpoint_backend,
+        "checkpoint_thread_id": settings.checkpoint_thread_id,
         "route_decision": START,
         "report": None,
     }
@@ -149,9 +157,31 @@ def _next_plan(plans: list[SearchPlanItem]) -> SearchPlanItem | None:
     return plans[0] if plans else None
 
 
+def _append_event(graph_state: GraphState, field: str, event: str) -> list[str]:
+    if not event:
+        return list(graph_state[field])  # type: ignore[index]
+    if field == "progress_events":
+        LOGGER.info(event)
+    elif field == "fallback_events":
+        LOGGER.info("Fallback: %s", event)
+    return [*graph_state[field], event]  # type: ignore[index]
+
+
+def _append_events(graph_state: GraphState, field: str, events: list[str]) -> list[str]:
+    if not events:
+        return list(graph_state[field])  # type: ignore[index]
+    for event in events:
+        if field == "progress_events":
+            LOGGER.info(event)
+        elif field == "fallback_events":
+            LOGGER.info("Fallback: %s", event)
+    return [*graph_state[field], *events]  # type: ignore[index]
+
+
 class LangGraphAgentRunner:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
+        self._checkpoint_context = None
 
     def run(self) -> RunReport:
         initial_state = build_initial_graph_state(self.settings)
@@ -160,7 +190,7 @@ class LangGraphAgentRunner:
             graph = self._build_graph(client)
             final_state = graph.invoke(
                 initial_state,
-                config={"recursion_limit": self._recursion_limit()},
+                config=self._invoke_config(),
             )
 
         report = cast(RunReport | None, final_state.get("report"))
@@ -187,6 +217,14 @@ class LangGraphAgentRunner:
             plans = planner.plan(state)
             if not plans:
                 LOGGER.info("Planner produced no more queries. Stopping.")
+                fallback_events = graph_state["fallback_events"]
+                if planner.last_fallback_reason:
+                    fallback_events = _append_event(
+                        graph_state,
+                        "fallback_events",
+                        "llm_plan_failed -> rule_based_plan: "
+                        f"{planner.last_fallback_reason}",
+                    )
                 return {
                     **_agent_state_update(state),
                     "plans": [],
@@ -202,6 +240,12 @@ class LangGraphAgentRunner:
                     "current_requirements": "",
                     "current_job": None,
                     "metrics": None,
+                    "progress_events": _append_event(
+                        graph_state,
+                        "progress_events",
+                        f"plan_queries: no queries produced at iteration {state.iteration}",
+                    ),
+                    "fallback_events": fallback_events,
                     "route_decision": EXPORT_NODE,
                 }
 
@@ -215,6 +259,21 @@ class LangGraphAgentRunner:
                 "plans": plans,
                 "current_plan": _next_plan(plans),
                 "metrics": None,
+                "progress_events": _append_event(
+                    graph_state,
+                    "progress_events",
+                    f"plan_queries: planned {len(plans)} queries at iteration {state.iteration}",
+                ),
+                "fallback_events": (
+                    _append_event(
+                        graph_state,
+                        "fallback_events",
+                        "llm_plan_failed -> rule_based_plan: "
+                        f"{planner.last_fallback_reason}",
+                    )
+                    if planner.last_fallback_reason
+                    else graph_state["fallback_events"]
+                ),
                 "route_decision": SEARCH_NODE,
             }
 
@@ -230,6 +289,17 @@ class LangGraphAgentRunner:
                 "pending_url_sources": pending_url_sources,
                 "current_url": pending_urls[0] if pending_urls else None,
                 "metrics": metrics,
+                "progress_events": _append_event(
+                    graph_state,
+                    "progress_events",
+                    "search_sources: discovered "
+                    f"{len(pending_urls)} pending URLs from {len(graph_state['plans'])} queries",
+                ),
+                "fallback_events": _append_events(
+                    graph_state,
+                    "fallback_events",
+                    metrics.fallback_events,
+                ),
                 "route_decision": NEXT_CANDIDATE_NODE,
             }
 
@@ -256,6 +326,16 @@ class LangGraphAgentRunner:
                 "current_requirements": "",
                 "current_job": None,
                 "metrics": metrics,
+                "progress_events": _append_event(
+                    graph_state,
+                    "progress_events",
+                    (
+                        "next_candidate: reflecting after candidate batch "
+                        f"(accepted_total={state.accepted_count})"
+                        if should_reflect
+                        else f"next_candidate: {len(graph_state['pending_urls'])} URLs pending"
+                    ),
+                ),
                 "route_decision": REFLECT_NODE if should_reflect else FETCH_NODE,
             }
 
@@ -271,6 +351,7 @@ class LangGraphAgentRunner:
 
             current_url = pending_urls.pop(0)
             current_source = pending_url_sources.get(current_url, "")
+            fallback_start = len(metrics.fallback_events)
             raw_job, html, error = executor.fetch_or_load_candidate(
                 state,
                 current_url,
@@ -297,6 +378,24 @@ class LangGraphAgentRunner:
                 "current_job": None,
                 "last_error": error,
                 "metrics": metrics,
+                "progress_events": _append_event(
+                    graph_state,
+                    "progress_events",
+                    (
+                        f"fetch_or_load_candidate: loaded cached raw job {current_url}"
+                        if raw_job is not None
+                        else (
+                            f"fetch_or_load_candidate: fetched html {current_url}"
+                            if html is not None
+                            else f"fetch_or_load_candidate: skipped {current_url}"
+                        )
+                    ),
+                ),
+                "fallback_events": _append_events(
+                    graph_state,
+                    "fallback_events",
+                    metrics.fallback_events[fallback_start:],
+                ),
                 "route_decision": route_decision,
             }
 
@@ -305,6 +404,7 @@ class LangGraphAgentRunner:
             metrics = graph_state["metrics"] or IterationMetrics(
                 iteration=state.iteration
             )
+            fallback_start = len(metrics.fallback_events)
             raw_job, error = executor.parse_job(
                 state,
                 graph_state["current_url"] or "",
@@ -318,6 +418,20 @@ class LangGraphAgentRunner:
                 "current_raw_job": raw_job,
                 "last_error": error,
                 "metrics": metrics,
+                "progress_events": _append_event(
+                    graph_state,
+                    "progress_events",
+                    (
+                        f"parse_job: parsed {graph_state['current_url']}"
+                        if raw_job is not None
+                        else f"parse_job: skipped {graph_state['current_url']}"
+                    ),
+                ),
+                "fallback_events": _append_events(
+                    graph_state,
+                    "fallback_events",
+                    metrics.fallback_events[fallback_start:],
+                ),
                 "route_decision": (
                     EVALUATE_NODE if raw_job is not None else NEXT_CANDIDATE_NODE
                 ),
@@ -332,11 +446,26 @@ class LangGraphAgentRunner:
             if raw_job is None:
                 return {"route_decision": NEXT_CANDIDATE_NODE}
 
+            fallback_start = len(metrics.fallback_events)
             result = executor.evaluate_job(state, raw_job, metrics)
             return {
                 **_agent_state_update(state),
                 "classification_result": result,
                 "metrics": metrics,
+                "progress_events": _append_event(
+                    graph_state,
+                    "progress_events",
+                    (
+                        f"evaluate_job: accepted {raw_job.job_url} score={result.score}"
+                        if result.accepted
+                        else f"evaluate_job: rejected {raw_job.job_url} reason={result.reason}"
+                    ),
+                ),
+                "fallback_events": _append_events(
+                    graph_state,
+                    "fallback_events",
+                    metrics.fallback_events[fallback_start:],
+                ),
                 "route_decision": (
                     EXTRACT_NODE if result.accepted else NEXT_CANDIDATE_NODE
                 ),
@@ -347,10 +476,25 @@ class LangGraphAgentRunner:
             if raw_job is None:
                 return {"route_decision": NEXT_CANDIDATE_NODE}
 
-            tech_tags, requirements = executor.extract_job_details(raw_job)
+            metrics = graph_state["metrics"] or IterationMetrics(
+                iteration=graph_state["iteration"]
+            )
+            fallback_start = len(metrics.fallback_events)
+            tech_tags, requirements = executor.extract_job_details(raw_job, metrics)
             return {
                 "current_tech_tags": tech_tags,
                 "current_requirements": requirements,
+                "metrics": metrics,
+                "progress_events": _append_event(
+                    graph_state,
+                    "progress_events",
+                    f"extract_job_details: extracted {len(tech_tags)} tags for {raw_job.job_url}",
+                ),
+                "fallback_events": _append_events(
+                    graph_state,
+                    "fallback_events",
+                    metrics.fallback_events[fallback_start:],
+                ),
                 "route_decision": DEDUPE_NODE,
             }
 
@@ -376,6 +520,11 @@ class LangGraphAgentRunner:
                 **_agent_state_update(state),
                 "current_job": job,
                 "metrics": metrics,
+                "progress_events": _append_event(
+                    graph_state,
+                    "progress_events",
+                    f"deduplicate_and_merge: accepted_total={state.accepted_count}",
+                ),
                 "route_decision": NEXT_CANDIDATE_NODE,
             }
 
@@ -386,11 +535,27 @@ class LangGraphAgentRunner:
                 reflector.update(state, metrics)
             return {
                 **_agent_state_update(state),
+                "progress_events": _append_event(
+                    graph_state,
+                    "progress_events",
+                    (
+                        "reflect_strategy: stopping"
+                        if state.should_stop()
+                        else "reflect_strategy: continuing"
+                    ),
+                ),
                 "route_decision": EXPORT_NODE if state.should_stop() else PLAN_NODE,
             }
 
         def export_result(graph_state: GraphState) -> dict[str, object]:
-            report = export_run_report(to_agent_state(graph_state), export_tool)
+            report = export_run_report(
+                to_agent_state(graph_state),
+                export_tool,
+                progress_events=graph_state["progress_events"],
+                fallback_events=graph_state["fallback_events"],
+                checkpoint_backend=graph_state["checkpoint_backend"],
+                checkpoint_thread_id=graph_state["checkpoint_thread_id"],
+            )
             return {"report": report, "route_decision": END}
 
         def route_entry(
@@ -501,7 +666,43 @@ class LangGraphAgentRunner:
             {PLAN_NODE: PLAN_NODE, EXPORT_NODE: EXPORT_NODE},
         )
         graph.add_edge(EXPORT_NODE, END)
-        return graph.compile()
+        checkpointer = self._build_checkpointer()
+        if checkpointer is None:
+            return graph.compile()
+        return graph.compile(checkpointer=checkpointer)
+
+    def _invoke_config(self) -> dict[str, object]:
+        return {
+            "recursion_limit": self._recursion_limit(),
+            "configurable": {"thread_id": self.settings.checkpoint_thread_id},
+        }
+
+    def _build_checkpointer(self):  # type: ignore[no-untyped-def]
+        backend = self.settings.checkpoint_backend
+        if backend in {"", "off", "none"}:
+            return None
+        if backend == "memory":
+            from langgraph.checkpoint.memory import MemorySaver
+
+            return MemorySaver()
+        if backend == "sqlite":
+            try:
+                from langgraph.checkpoint.sqlite import SqliteSaver
+            except ModuleNotFoundError as exc:  # pragma: no cover - optional dependency
+                raise RuntimeError(
+                    "SQLite checkpointing requires `langgraph-checkpoint-sqlite`. "
+                    "Install the checkpoint extra or set AGENT_CHECKPOINT_BACKEND=memory."
+                ) from exc
+
+            self.settings.checkpoint_db_path.parent.mkdir(parents=True, exist_ok=True)
+            saver = SqliteSaver.from_conn_string(str(self.settings.checkpoint_db_path))
+            if hasattr(saver, "__enter__"):
+                self._checkpoint_context = saver
+                return saver.__enter__()
+            return saver
+        raise ValueError(
+            "Unsupported AGENT_CHECKPOINT_BACKEND. Use 'memory', 'sqlite', or 'off'."
+        )
 
     def _recursion_limit(self) -> int:
         per_iteration_steps = (

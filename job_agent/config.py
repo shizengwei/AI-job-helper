@@ -26,6 +26,9 @@ class Settings:
     outputs_dir: Path = Path("outputs")
     source_domains: tuple[str, ...] = tuple(SOURCE_DOMAINS)
     agent_runtime: str = "langgraph"
+    checkpoint_backend: str = "memory"
+    checkpoint_db_path: Path = Path("outputs/langgraph_checkpoints.sqlite")
+    checkpoint_thread_id: str = "job-agent-default"
 
     @property
     def llm_enabled(self) -> bool:
@@ -49,4 +52,13 @@ def load_settings() -> Settings:
         openai_api_key=os.getenv("OPENAI_API_KEY", ""),
         outputs_dir=Path(os.getenv("OUTPUTS_DIR", "outputs")),
         agent_runtime=os.getenv("AGENT_RUNTIME", "langgraph").strip().lower(),
+        checkpoint_backend=os.getenv("AGENT_CHECKPOINT_BACKEND", "memory")
+        .strip()
+        .lower(),
+        checkpoint_db_path=Path(
+            os.getenv("AGENT_CHECKPOINT_DB", "outputs/langgraph_checkpoints.sqlite")
+        ),
+        checkpoint_thread_id=os.getenv(
+            "AGENT_CHECKPOINT_THREAD_ID", "job-agent-default"
+        ),
     )

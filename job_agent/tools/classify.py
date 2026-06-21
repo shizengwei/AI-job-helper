@@ -19,12 +19,21 @@ class JobClassifier:
             if settings.llm_enabled
             else None
         )
+        self.last_strategy = ""
+        self.last_fallback_reason = ""
 
     def classify(self, job: RawJobPosting) -> ClassificationResult:
+        self.last_strategy = ""
+        self.last_fallback_reason = ""
         if self.llm is not None:
             llm_result = self.llm.classify_job(job)
             if llm_result is not None:
+                self.last_strategy = "llm"
                 return llm_result
+            self.last_fallback_reason = "llm_unavailable_or_failed"
+        else:
+            self.last_fallback_reason = "llm_disabled"
+        self.last_strategy = "heuristic"
         return self._heuristic_classify(job)
 
     def _heuristic_classify(self, job: RawJobPosting) -> ClassificationResult:

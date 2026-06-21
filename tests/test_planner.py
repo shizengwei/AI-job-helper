@@ -29,6 +29,8 @@ def test_planner_without_llm_uses_rule_fallback():
 
     assert len(plans) == 3
     assert all(plan.query.startswith("site:") for plan in plans)
+    assert planner.last_strategy == "rules"
+    assert planner.last_fallback_reason == "llm_disabled"
 
 
 def test_planner_with_llm_uses_llm_candidates_first():
@@ -64,3 +66,5 @@ def test_planner_with_llm_uses_llm_candidates_first():
     assert plans[0].source_domain == "jobs.lever.co"
     assert plans[0].role_keyword == "Machine Learning Engineer"
     assert plans[0].campus_keyword == "intern"
+    assert planner.last_strategy == "llm"
+    assert planner.last_fallback_reason == ""
